@@ -1,0 +1,201 @@
+562: fix — flip the ENTRY_FRONT_EDGE entry from far-edge breakout chase to near-edge pullback trap
+
+The v5.57 "front-running anticipation" entry armed the order 0.5*ATR BEYOND the
+far edge the breakout crosses, so every setup was a STOP that chased extension:
+a Resistance LONG at b.bottom+slDist (= b.top+0.5*ATR) and a Support SHORT at
+b.top-slDist (= b.bottom-0.5*ATR). This change moves the entry to the EDGE THE
+ARMING CLOSE HAS ALREADY CLEARED -- a LIMIT that waits for a retrace INTO the
+level and traps the pullback, rather than paying up for the break.
+
+VERSION 5.61 -> 5.62
+
+  Applied with _tools/_bump_version.py, which rewrote all 20 human-facing rows in
+  one pass (11 '#property version' stamps, otto.mq5's Pine port banner and
+  startup Print, OttoDefines' module header box and '#property description' with
+  the four versioned input-group labels [9]-[12], and README's
+  '**Current base: vX.Y**'). The pass exited 0 with 'no v5.61 literal remains in
+  the shipped sources or docs', so no partial bump can leave the tree stamping
+  two releases at once.
+
+ENTRY GEOMETRY (COttoOrderManager.mqh, COttoBlockManager.mqh)
+
+  Both twins of the entry arithmetic flip together. They MUST stay
+  byte-identical: COttoBlockManager::BlockEntryPrice() feeds the Front-Run veto
+  projection while COttoOrderManager::CalcEntryPrice() feeds the order, so any
+  divergence would have the veto judging a price the order never had.
+
+    CalcEntryPrice()      LONG : block.bottom + slDist  ->  block.bottom - slDist
+                          SHORT: block.top    - slDist  ->  block.top    + slDist
+
+    BlockEntryPrice()     LONG : b.bottom + slDist      ->  b.bottom - slDist
+                          SHORT: b.top    - slDist      ->  b.top    + slDist
+
+  slDist is unchanged at blockHeight + 0.5*ATR, and the SL stays entry -/+
+  slDist, so the RISK DISTANCE is identical on both sides of this change -- only
+  the SIDE OF THE ZONE the order waits on moved. The waiting depth is one whole
+  zone height plus half an ATR outside the near edge.
+
+
+ROUTING: PHYSICAL REST IS ORDINARY AGAIN (COttoOrderManager.mqh)
+
+  No router code changed, and none needed to: the Hybrid Router's priceValid
+  test is a LIMIT-side legality test (BUY_LIMIT below bid, SELL_LIMIT above
+  ask). Under the far-edge entry that test was false on the ordinary path, so
+  the VIRTUAL arm carried every setup. Under the near-edge entry it is TRUE on
+  the ordinary path, so a real broker limit now rests and the virtual arm drops
+  back to its designed role: the fallback for a price that has already traded
+  through the level, or a send the venue refuses. The virtual engine is retained
+  in full -- arm book, cross test, MARKET fire, localTP re-derivation.
+
+TRIGGER SIGN (COttoOrderManager.mqh, CheckVirtualTriggers)
+
+  Flipping the entry side inverts the fill semantics, so the cross predicate
+  inverts with it or the fallback would fire on the wrong side of price:
+
+    was (v5.57, breakout):  isLong ? (ask < trigger) : (bid > trigger)
+    now (v5.62, pullback):  isLong ? (ask > trigger) : (bid < trigger)
+
+  A LONG now fires once the market has traded DOWN to/through its level and a
+
+TARGET ANCHOR: DELIBERATELY UNCHANGED (COttoOrderManager.mqh,
+COttoBlockManager.mqh)
+
+  block.localTP stays anchored on the FAR edge (farEdge +/- tpRR*slDist) in all
+  three places that derive it -- PlaceOrArmOrder, CheckVirtualTriggers and both
+  BlockManager veto passes. Anchoring the projection on the pullback entry
+  instead would push the target out by the entry's offset and veto setups that
+  were never front-runs.
+
+  The realized reward therefore CHANGES the SIGN of its deviation, and this is
+  the one behavioural consequence worth stating loudly:
+
+    v5.57  RR = InpMaxRR - 0.5*ATR/slDist         (4.0 -> 3.5R, below input)
+    v5.62  RR = InpMaxRR + 1 + blockHeight/slDist (4.0 -> 5.5R, above input)
+
+  The entry now sits a whole slDist outside the near edge while the far-edge
+  target is untouched, so the reward spans the entire zone plus 1R plus the
+  far-edge projection. On the documented 1.0-high zone at ATR 2.0 with
+  InpMaxRR 4.0 the realized RR is 5.5R. Intentional, and pinned by the probe so
+  a future re-anchor has to be a deliberate act.
+
+JOURNAL + DOCS (COttoJournal.mqh, OttoDefines.mqh)
+
+  The armed and entry records printed the retired geometry ("Front-Run
+  Breakdown / Sell at Bottom Edge - 0.5*ATR | SL at Top Edge" and the mirrored
+  RESISTANCE string, plus "Trigger Price : (Front-Run: far edge +/- 0.5*ATR)").
+  Both now name the pullback trap and the correct order side: SUPPORT maps to a
+  SELL limit one slDist above the top edge, RESISTANCE to a BUY limit one slDist
+  below the bottom edge. The ENTRY_FRONT_EDGE enum doc block describes the new
+  arithmetic.
+
+VERIFICATION
+
+  * Compile gate: powershell -NoProfile -ExecutionPolicy Bypass -File
+    _tools\build_check.ps1 -> 0 errors, 0 warnings, headers verified from the
+    staging tree.
+
+  * _probe\test_v557_frontrun.py rewritten for the new geometry, 94/94 passing:
+    the twin-identity check still compares both bodies byte for byte, the entry
+    pin now reads (bottom - slDist) / (top + slDist), the cross pin reads the
+    pullback predicate and asserts the v5.57 breakout predicate is absent, and
+    section 7 re-derives the geometry numerically -- risk still exactly one
+    slDist, reward == (InpMaxRR + 1 + blockHeight/slDist)*slDist on all four
+    cases, realized RR bounded by (InpMaxRR, InpMaxRR+2], and the documented
+    case at 5.5R.
+
+  * Full _probe suite: 27 files, no regression against the pre-change baseline.
+    22 suites pass outright, including test_v540_hybrid.py 41/41, which pins the
+    physical/virtual router. The 4 pre-existing failures are unchanged and
+    unrelated to entry geometry -- test_v528_hotfix 57/68, test_v531_smart_trim
+    15/38, test_v532_hightable 125/135, test_v543_session 27/29 -- they fail
+    identically before and after this change.
+
+  * EOL/encoding: python _tools\normalize_eol.py . --check -> 11 files, all
+    strict CRLF, 0 bare LF, 0 bare CR, rewritten=0.
+
+
+  SHORT once it has traded UP to it; a gap straight through the level still
+  fires on the first tick beyond it. This is the difference between a limit
+  fill and a stop fill and it is invisible to the compiler.
+
+
+===============================================================
+ v5.62 - PART 2: AGGREGATE RISK CANARY + JOURNAL GEOMETRY
+===============================================================
+
+A. CHighTableAuditor.mqh - aggregate (basket-summed) bound
+---------------------------------------------------------------
+   The existing check is a PER-LEG abort: it compares the worst SINGLE
+   position against RiskPercent * 1.50 and is structurally blind to four
+   legs that are each individually legal yet sum to four times the
+   intended exposure. Added a second, INDEPENDENT gate:
+
+     double sumRiskPct = 0.0;              // beside peakRiskPct
+     sumRiskPct += posRiskPct;             // inside the loop, after the
+                                           // lossDist <= 0.0 guard
+
+   Ceiling is CONFIG-PROOF, recomputed every audit from the live ladder:
+
+     nominalStackPct    = RiskPercent + InpRiskT2Pct + InpRiskT3Pct + InpRiskT4Pct;
+     maxRungPct         = MathMax(...);
+     maxAllowedStackPct = MathMax(nominalStackPct, maxRungPct) * 1.50;
+
+   At shipped defaults that is 2.75 * 1.50 = 4.125%, against a full-ladder
+   2.75%. The gate is therefore INERT on the shipped config by design: it
+   is a misconfiguration canary, not live-exposure protection. A heavier
+   ladder lifts its own ceiling; a botched rung cannot outrun it.
+
+   The peak gate is byte-identical and still evaluated first, so v5.46
+   loss-side isolation is untouched (test_v546 28 -> 37 checks, 0 fail).
+
+   Two-phase confirm: one audit cycle can catch the basket mid-scale-in
+   before a fresh rung has its SL written, so the first breach only sets
+   m_aggRiskSeen and the alert dispatches on the SECOND consecutive cycle.
+   Healthy path re-arms BOTH the latch and the confirm flag.
+
+   New members (declared inside the include guard, initialised in the ctor):
+     bool m_alertSent_AggRiskBreach;  // trailing // comment is required by
+                                      // test_v532_hightable.py:247 regex
+     bool m_aggRiskSeen;
+
+B. COttoJournal.mqh - geometry wording (4 strings, 2 sites)
+---------------------------------------------------------------
+   Both sites now state the arithmetic and the SL side explicitly:
+     SUPPORT    -> Sell Limit at Top Edge + 1.0*H + 0.5*ATR
+                   SL one slDist ABOVE Entry
+     RESISTANCE -> Buy Limit at Bottom Edge - 1.0*H - 0.5*ATR
+                   SL one slDist BELOW Entry
+
+   COMPILE FIX: the second site (LogEntry) has no btype parameter - its
+   signature is (ticket, dir, entryPrice, slPrice, lotSize, riskMoney,
+   const SSniperBlock &blk) - so the branch must test blk.type. The
+   LogSetupArmed site does take btype and keeps using it.
+
+C. Documentation + probe sync
+---------------------------------------------------------------
+   OttoDefines.mqh   : the 2.75% note now describes TWO gates (per-leg peak
+                       1.5%, aggregate canary 4.125%) instead of implying
+                       the sum is unbounded. 2.75% remains legal by design.
+   test_v52x_pyramid : docstring item 7 + pin rationale mention the canary.
+   test_v546         : +9 checks pinning the gate shape (accumulator inside
+                       the loop after the guard, ceiling derived from the
+                       live inputs, 1.50 tolerance, latch + re-arm, zero-
+                       ladder guard, member declared + initialised).
+   test_v557         : journal pin repointed to the new strings; +1 check
+                       that the SL side is named.
+
+VERIFICATION
+---------------------------------------------------------------
+   build_check.ps1         0 errors, 0 warnings (headers from staging tree)
+   test_v546_risk_isolation  37 / 37   (was 28 / 28)
+   test_v557_frontrun        95 / 95   (was 94 / 94)
+   test_v52x_pyramid        134 / 134
+   test_v532_hightable      125 / 135  UNCHANGED, pre-existing reds only
+   full 27-file census     only the 4 known baseline failures:
+                             v528 57/68, v531 15/38, v532_hightable 125/135,
+                             v543 27/29. No new red anywhere.
+   normalize_eol.py --check files=11 rewritten=0, 0 bare LF, 0 bare CR
+
+   NOT DONE, ON PURPOSE: no git commit/push. There is no .git in this tree
+   or any parent, git ls-remote resolved no refs for the 5.61 remote, and
+   user.name / user.email are both unset. Version already reads 5.62.
